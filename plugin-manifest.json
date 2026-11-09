@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "id": "dev.local.hidden-channels",
+  "name": "Hidden Channels Viewer",
+  "description": "Lists channels you cannot open (name, category, type, which roles can see them) in servers you are in. Read-only; cannot read messages.",
+  "author": "Local build",
+  "version": "0.2.0",
+  "dependencies": {
+    "valenced.api": {
+      "version": ">=1 <2"
+    },
+    "discord": {
+      "version": "*"
+    }
+  },
+  "dist": {
+    "script": "index.js"
+  }
+}

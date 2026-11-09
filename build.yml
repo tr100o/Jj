@@ -1,0 +1,63 @@
+name: build
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Assemble plugin layout
+        run: |
+          mkdir -p plugins/hidden-channels/js types
+          cp plugin-manifest.json plugins/hidden-channels/manifest.json
+          cp index.ts core.ts plugins/hidden-channels/js/
+          echo '{ "extends": "../../tsconfig.base.json" }' > plugins/hidden-channels/tsconfig.json
+          cat > tsconfig.base.json <<'JSON'
+          {
+            "compilerOptions": {
+              "target": "ESNext", "module": "ESNext", "moduleResolution": "Bundler",
+              "jsx": "react-jsx", "strict": true, "skipLibCheck": true,
+              "esModuleInterop": true, "resolveJsonModule": true, "noEmit": true,
+              "types": ["@valenced/types"]
+            },
+            "include": ["${configDir}/**/*", "types"],
+            "exclude": ["${configDir}/build", "${configDir}/node_modules"]
+          }
+          JSON
+          echo "export {}" > types/assets.d.ts
+      - run: bun install
+      - run: bun run build
+      - name: Package and index
+        run: |
+          set -e
+          OUT=dist; rm -rf $OUT; mkdir -p $OUT/pkg
+          cp plugins/hidden-channels/manifest.json $OUT/pkg/
+          cp plugins/hidden-channels/build/js/index.js $OUT/pkg/
+          (cd $OUT/pkg && zip -q -X ../dev.local.hidden-channels.zip manifest.json index.js)
+          rm -rf $OUT/pkg
+          python3 - <<'PY'
+          import json, hashlib, os, datetime
+          repo = os.environ["GITHUB_REPOSITORY"]
+          d = open("dist/dev.local.hidden-channels.zip", "rb").read()
+          m = json.load(open("plugin-manifest.json"))
+          v = m["version"]
+          idx = {"format": 1, "name": "Hidden Channels Repo", "description": "Hidden Channels Viewer (read-only).",
+                 "generated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "plugins": {m["id"]: {"name": m["name"], "description": m["description"], "author": m["author"],
+                   "channels": {"latest": v},
+                   "versions": {v: {"url": f"https://raw.githubusercontent.com/{repo}/main/dist/dev.local.hidden-channels.zip",
+                                    "sha256": hashlib.sha256(d).hexdigest(), "size": len(d),
+                                    "dependencies": m["dependencies"]}}}}}
+          json.dump(idx, open("dist/index.json", "w"), indent=1)
+          PY
+          cat dist/index.json
+      - name: Commit dist
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -f dist
+          git commit -m "build dist" || echo "nothing to commit"
+          git push
