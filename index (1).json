@@ -1,0 +1,31 @@
+{
+ "format": 1,
+ "name": "Hidden Channels Repo",
+ "description": "Hidden Channels Viewer (read-only).",
+ "generated": "2026-11-09T11:24:34Z",
+ "plugins": {
+  "dev.local.hidden-channels": {
+   "name": "Hidden Channels Viewer",
+   "description": "Lists channels you cannot open (name, category, type, roles). Read-only; cannot read messages.",
+   "author": "Local build",
+   "channels": {
+    "latest": "0.1.3"
+   },
+   "versions": {
+    "0.1.3": {
+     "url": "https://raw.githubusercontent.com/tr100o/Jj/main/dev.local.hidden-channels.zip",
+     "sha256": "cdf1eaf8bd8ae50c916c593f72237153492738a767c843ddcb3b8ed191985883",
+     "size": 2690,
+     "dependencies": {
+      "discord": {
+       "version": "*"
+      },
+      "valenced.api": {
+       "version": ">=1 <2"
+      }
+     }
+    }
+   }
+  }
+ }
+}
