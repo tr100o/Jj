@@ -1,0 +1,307 @@
+name: build
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Assemble plugin layout
+        run: |
+          cat > package.json <<'EOF_PKG'
+          {
+          	"name": "@example/valenced-plugins",
+          	"private": true,
+          	"type": "module",
+          	"scripts": {
+          		"build": "valenced-plugin build",
+          		"build:dev": "valenced-plugin build --dev",
+          		"generate-index": "valenced-plugin generate-index",
+          		"plan-releases": "valenced-plugin plan-releases --plugins-dir plugins --plugins-dir themes",
+          		"serve": "valenced-plugin serve",
+          		"lint": "biome check",
+          		"lint:types": "tsc -b plugins/*/tsconfig.json themes/*/tsconfig.json && tsc -p cli --noEmit"
+          	},
+          	"dependencies": {
+          		"@revenge-mod/devtools-client": "^1.4.0",
+          		"@revenge-mod/devtools-shared": "^1.3.0",
+          		"@valenced/plugin-cli": "git+https://github.com/Valenced/valenced-plugin-cli.git",
+          		"@valenced/types": "git+https://github.com/Valenced/valenced-types.git",
+          		"@valenced/themes-api": "git+https://github.com/Valenced/valenced-themes-types.git"
+          	},
+          	"devDependencies": {
+          		"@biomejs/biome": "^2.5.12",
+          		"@types/node": "^26.4.1",
+          		"@types/react": "^19.2.18",
+          		"react-native": "0.81.6",
+          		"typescript": "^7.0.2"
+          	},
+          	"overrides": {
+          		"@react-native/community-cli-plugin": "npm:dry-uninstall",
+          		"@react-native/codegen": "npm:dry-uninstall",
+          		"babel-jest": "npm:dry-uninstall",
+          		"babel-plugin-syntax-hermes-parser": "npm:dry-uninstall",
+          		"hermes-compiler": "npm:dry-uninstall",
+          		"jsc-android": "npm:dry-uninstall",
+          		"react-devtools-core": "npm:dry-uninstall",
+          		"recyclerlistview": "npm:dry-uninstall",
+          		"react-native-gesture-handler": "npm:dry-uninstall",
+          		"react-native-screens": "npm:dry-uninstall"
+          	},
+          	"trustedDependencies": [
+          		"@valenced/plugin-cli",
+          		"@swc/core"
+          	]
+          }
+          EOF_PKG
+          cat > plugin-manifest.json <<'EOF_MAN'
+          {
+            "format": 1,
+            "id": "dev.local.hidden-channels",
+            "name": "Hidden Channels Viewer",
+            "description": "Lists channels you cannot open (name, category, type, which roles can see them) in servers you are in. Read-only; cannot read messages.",
+            "author": "Local build",
+            "version": "0.2.0",
+            "dependencies": {
+              "valenced.api": {
+                "version": ">=1 <2"
+              },
+              "discord": {
+                "version": "*"
+              }
+            },
+            "dist": {
+              "script": "index.js"
+            }
+          }
+          EOF_MAN
+          cat > index.ts <<'EOF_IDX'
+          /**
+           * Hidden Channels Viewer (v0.1, diagnostic build).
+           * Read-only. Uses only data Discord already delivered to this client. No network, no token.
+           * UNVERIFIED on a device: store lookup goes through Metro's module registry (globalThis.modules).
+           */
+          import { collectHidden, formatGuild, VIEW_CHANNEL } from './core'
+
+          const TAG = '[hidden-channels]'
+
+          function findAlert(): any {
+          	const mods = (globalThis as any).modules
+          	if (!mods) return undefined
+          	for (const id of Object.keys(mods)) {
+          		const m = mods[id]
+          		if (!m?.isInitialized) continue
+          		const ex = m.publicModule?.exports
+          		for (const c of [ex?.default, ex]) {
+          			try { if (c && typeof c.alert === 'function' && typeof c.prompt === 'function') return c } catch {}
+          		}
+          	}
+          }
+          const Alert: any = { alert: (...a: any[]) => { const A = findAlert(); if (A) A.alert(...a); else console.log(TAG, ...a) } }
+
+          function findStore(name: string): any {
+          	const mods = (globalThis as any).modules
+          	if (!mods) return undefined
+          	for (const id of Object.keys(mods)) {
+          		const m = mods[id]
+          		if (!m?.isInitialized) continue // never force-initialize modules
+          		const ex = m.publicModule?.exports
+          		for (const c of [ex?.default, ex]) {
+          			try {
+          				if (c && typeof c.getName === 'function' && c.getName() === name) return c
+          			} catch {}
+          		}
+          	}
+          	return undefined
+          }
+
+          function run() {
+          	const Channels = findStore('ChannelStore')
+          	const Guilds = findStore('GuildStore')
+          	const Perms = findStore('PermissionStore')
+          	const Roles = findStore('GuildRoleStore')
+          	const Selected = findStore('SelectedGuildStore')
+
+          	const status = { ChannelStore: !!Channels, GuildStore: !!Guilds, PermissionStore: !!Perms, GuildRoleStore: !!Roles }
+          	console.log(TAG, 'stores', JSON.stringify(status))
+
+          	const missing = Object.entries(status).filter(([, v]) => !v).map(([k]) => k)
+          	if (missing.length || typeof Channels.getMutableGuildChannelsForGuild !== 'function' || typeof Perms.can !== 'function') {
+          		Alert.alert('Hidden Channels', `لم أجد واجهات Discord المطلوبة:\n${missing.join(', ') || 'دوال ناقصة في ChannelStore/PermissionStore'}\n\nأرسل لي هذه الرسالة.`)
+          		return
+          	}
+
+          	const guilds: any[] = Object.values(Guilds.getGuilds?.() ?? {})
+          	const results: { name: string; text: string; count: number }[] = []
+          	let totalKnown = 0
+          	for (const g of guilds) {
+          		const channels = Channels.getMutableGuildChannelsForGuild(g.id) ?? {}
+          		totalKnown += Object.keys(channels).length
+          		const list = collectHidden({
+          			channels,
+          			canView: ch => Perms.can(VIEW_CHANNEL, ch),
+          			roleName: id => Roles.getRole?.(g.id, id)?.name,
+          		})
+          		if (list.length) results.push({ name: g.name, text: formatGuild(g.name, list), count: list.length })
+          	}
+
+          	console.log(TAG, `guilds=${guilds.length} channelsKnown=${totalKnown} guildsWithHidden=${results.length}`)
+
+          	if (!results.length) {
+          		Alert.alert('Hidden Channels',
+          			`فحصت ${guilds.length} سيرفر (${totalKnown} قناة معروفة للتطبيق).\nلا توجد قنوات مخفية وصلت بياناتها لتطبيقك.\n\nهذا يعني على الأرجح أن Discord لا يرسل هذه البيانات للجوال، ولا يمكن لأي إضافة عرضها.`)
+          		return
+          	}
+
+          	const currentId = Selected?.getGuildId?.()
+          	results.sort((a, b) => Number(b.name === guilds.find(g => g.id === currentId)?.name) - Number(a.name === guilds.find(g => g.id === currentId)?.name))
+
+          	const show = (i: number) => {
+          		const r = results[i]
+          		Alert.alert(`مخفية (${i + 1}/${results.length})`, r.text, [
+          			{ text: 'إغلاق', style: 'cancel' },
+          			...(i + 1 < results.length ? [{ text: 'السيرفر التالي', onPress: () => show(i + 1) }] : []),
+          		])
+          	}
+          	show(0)
+          }
+
+          export default plugin({
+          	start() {
+          		Alert.alert('Hidden Channels', 'الإضافة اشتغلت. ستظهر النتيجة بعد ثوانٍ.')
+          		// Give Discord a moment to finish loading guild data.
+          		setTimeout(() => {
+          			try { run() } catch (e) { console.error(TAG, e); Alert.alert('Hidden Channels', `خطأ: ${String(e)}`) }
+          		}, 6000)
+          	},
+          	stop() {},
+          })
+          EOF_IDX
+          cat > core.ts <<'EOF_CORE'
+          // Pure logic: no Discord imports, so it can be tested offline.
+          export const VIEW_CHANNEL = 1n << 10n
+
+          const TYPE_NAMES: Record<number, string> = {
+          	0: 'نصية', 2: 'صوتية', 4: 'تصنيف', 5: 'إعلانات', 13: 'ستيج', 15: 'منتدى', 16: 'وسائط',
+          }
+
+          export interface Hidden {
+          	id: string
+          	name: string
+          	type: string
+          	category: string
+          	topic: string
+          	roles: string[]
+          	members: number
+          	position: number
+          }
+
+          type Dict<T> = Record<string, T>
+
+          /** channels = all channels the client knows for the guild (id -> channel). */
+          export function collectHidden(opts: {
+          	channels: Dict<any>
+          	canView: (ch: any) => boolean
+          	roleName: (id: string) => string | undefined
+          }): Hidden[] {
+          	const all = Object.values(opts.channels)
+          	const cats: Dict<any> = {}
+          	for (const c of all) if (c.type === 4) cats[c.id] = c
+
+          	const out: Hidden[] = []
+          	for (const c of all) {
+          		if (c.type === 4) continue // categories are shown as the parent label
+          		let visible = true
+          		try { visible = opts.canView(c) } catch { continue }
+          		if (visible) continue
+
+          		const ow: any[] = Object.values(c.permissionOverwrites ?? {})
+          		const roles = ow
+          			.filter(o => o.type === 0 && (BigInt(o.allow ?? 0) & VIEW_CHANNEL) !== 0n)
+          			.map(o => opts.roleName(o.id) ?? `role:${o.id}`)
+          		const members = ow.filter(o => o.type === 1 && (BigInt(o.allow ?? 0) & VIEW_CHANNEL) !== 0n).length
+
+          		out.push({
+          			id: c.id,
+          			name: c.name ?? '?',
+          			type: TYPE_NAMES[c.type] ?? `نوع ${c.type}`,
+          			category: cats[c.parent_id ?? c.parentId]?.name ?? '—',
+          			topic: c.topic ?? '',
+          			roles,
+          			members,
+          			position: c.position ?? 0,
+          		})
+          	}
+          	return out.sort((a, b) => a.category.localeCompare(b.category) || a.position - b.position)
+          }
+
+          export function formatGuild(name: string, list: Hidden[], maxChars = 1400): string {
+          	let s = `${name}\nقنوات مخفية: ${list.length}\n`
+          	let lastCat = ''
+          	for (const h of list) {
+          		let block = ''
+          		if (h.category !== lastCat) { block += `\n▸ ${h.category}\n`; lastCat = h.category }
+          		block += ` • ${h.name} (${h.type})`
+          		if (h.roles.length) block += `\n   رتب: ${h.roles.slice(0, 4).join('، ')}${h.roles.length > 4 ? '…' : ''}`
+          		if (h.members) block += `\n   أشخاص: ${h.members}`
+          		if (h.topic) block += `\n   وصف: ${h.topic.slice(0, 60)}`
+          		block += '\n'
+          		if ((s + block).length > maxChars) return s + '\n… (القائمة مقتطعة)'
+          		s += block
+          	}
+          	return s
+          }
+          EOF_CORE
+          mkdir -p plugins/hidden-channels/js types
+          cp plugin-manifest.json plugins/hidden-channels/manifest.json
+          cp index.ts core.ts plugins/hidden-channels/js/
+          echo '{ "extends": "../../tsconfig.base.json" }' > plugins/hidden-channels/tsconfig.json
+          cat > tsconfig.base.json <<'JSON'
+          {
+            "compilerOptions": {
+              "target": "ESNext", "module": "ESNext", "moduleResolution": "Bundler",
+              "jsx": "react-jsx", "strict": true, "skipLibCheck": true,
+              "esModuleInterop": true, "resolveJsonModule": true, "noEmit": true,
+              "types": ["@valenced/types"]
+            },
+            "include": ["${configDir}/**/*", "types"],
+            "exclude": ["${configDir}/build", "${configDir}/node_modules"]
+          }
+          JSON
+          echo "export {}" > types/assets.d.ts
+      - run: bun install
+      - run: bun run build
+      - name: Package and index
+        run: |
+          set -e
+          OUT=dist; rm -rf $OUT; mkdir -p $OUT/pkg
+          cp plugins/hidden-channels/manifest.json $OUT/pkg/
+          cp plugins/hidden-channels/build/js/index.js $OUT/pkg/
+          (cd $OUT/pkg && zip -q -X ../dev.local.hidden-channels.zip manifest.json index.js)
+          rm -rf $OUT/pkg
+          python3 - <<'PY'
+          import json, hashlib, os, datetime
+          repo = os.environ["GITHUB_REPOSITORY"]
+          d = open("dist/dev.local.hidden-channels.zip", "rb").read()
+          m = json.load(open("plugin-manifest.json"))
+          v = m["version"]
+          idx = {"format": 1, "name": "Hidden Channels Repo", "description": "Hidden Channels Viewer (read-only).",
+                 "generated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "plugins": {m["id"]: {"name": m["name"], "description": m["description"], "author": m["author"],
+                   "channels": {"latest": v},
+                   "versions": {v: {"url": f"https://raw.githubusercontent.com/{repo}/main/dist/dev.local.hidden-channels.zip",
+                                    "sha256": hashlib.sha256(d).hexdigest(), "size": len(d),
+                                    "dependencies": m["dependencies"]}}}}}
+          json.dump(idx, open("dist/index.json", "w"), indent=1)
+          PY
+          cat dist/index.json
+      - name: Commit dist
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add -f dist
+          git commit -m "build dist" || echo "nothing to commit"
+          git push
